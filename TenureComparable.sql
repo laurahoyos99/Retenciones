@@ -1,0 +1,60 @@
+WITH 
+
+RETENIDOS AS(
+SELECT DISTINCT RIGHT(CONCAT('0000000000',Contrato) ,10) AS Contrato, MAX(DATE(FECHA_FINALIZACION)) AS FechaTiquete, SOLUCION_FINAL
+FROM `gcp-bia-tmps-vtr-dev-01.gcp_temp_cr_dev_01.2022-02-02_TIQUETES_GENERALES_DE_DESCONEXIONES_T` 
+WHERE Contrato IS NOT NULL AND SOLUCION_FINAL="NO RETENIDO" 
+AND EXTRACT(YEAR FROM DATE(FECHA_FINALIZACION))=2021
+GROUP BY Contrato, SOLUCION_FINAL
+),
+
+ACTIVOSMES AS(
+    SELECT DISTINCT RIGHT(CONCAT('0000000000',ACT_ACCT_CD) ,10) AS ACT_ACCT_CD, EXTRACT(MONTH FROM FECHA_EXTRACCION) AS MES,
+     FECHA_EXTRACCION AS FECHABASE
+    FROM `gcp-bia-tmps-vtr-dev-01.gcp_temp_cr_dev_01.2022-02-02_CRM_BULK_FILE_FINAL_HISTORIC_DATA_2021_D` a 
+    INNER JOIN RETENIDOS r ON RIGHT(CONCAT('0000000000',a.ACT_ACCT_CD) ,10)=r.Contrato AND FechaTiquete=FECHA_EXTRACCION
+    GROUP BY ACT_ACCT_CD, MES, FECHABASE),
+
+TENUREACTIVOS AS(
+ SELECT DISTINCT EXTRACT(MONTH FROM t.FECHA_EXTRACCION) AS MES, t.ACT_ACCT_CD,
+  CASE WHEN C_CUST_AGE <= 12 THEN "<1A"
+        WHEN C_CUST_AGE >12 AND C_CUST_AGE <= 36 THEN "1-3 A"
+        WHEN C_CUST_AGE >36 AND C_CUST_AGE <= 72 THEN "3-6 A"
+        WHEN C_CUST_AGE >72 AND C_CUST_AGE <= 120 THEN "6-10 A"
+    ELSE ">10A" END AS TENURE
+     FROM `gcp-bia-tmps-vtr-dev-01.gcp_temp_cr_dev_01.2022-02-02_CRM_BULK_FILE_FINAL_HISTORIC_DATA_2021_D` t INNER JOIN 
+    ACTIVOSMES a ON RIGHT(CONCAT('0000000000',t.ACT_ACCT_CD) ,10) = a.ACT_ACCT_CD AND a.MES = extract (month from t.FECHA_EXTRACCION) and a.FECHABASE = t.FECHA_EXTRACCION
+GROUP BY t.ACT_ACCT_CD, MES, TENURE),
+
+CHURNERSCRM AS(
+    SELECT DISTINCT ACT_ACCT_CD, MAX(CST_CHRN_DT) AS Maxfecha
+    FROM `gcp-bia-tmps-vtr-dev-01.gcp_temp_cr_dev_01.2022-02-02_CRM_BULK_FILE_FINAL_HISTORIC_DATA_2021_D`
+    GROUP BY ACT_ACCT_CD
+    HAVING EXTRACT (MONTH FROM Maxfecha) = EXTRACT (MONTH FROM MAX(FECHA_EXTRACCION))
+),
+
+/*Subconsulta que identifica los churners y no churners*/
+CHURNFLAGRESULT AS (
+SELECT DISTINCT t.ACT_ACCT_CD,t.MES,c.MaxFecha,TENURE,
+CASE WHEN c.MaxFecha IS NOT NULL THEN "Churner"
+WHEN c.Maxfecha IS NULL THEN "NonChurner" end as ChurnFlag
+FROM TENUREACTIVOS t LEFT JOIN CHURNERSCRM  c ON  t.ACT_ACCT_CD=c.ACT_ACCT_CD 
+AND EXTRACT(MONTH FROM MaxFecha)=t.MES
+GROUP BY t.ACT_ACCT_CD,t.MES,c.MaxFecha,TENURE)
+
+/*Consulta final que extrae el número de contratos en el mes de la última fecha de extracción y su respectivo tenure. Si se prende el filtro de Churner, 
+ se extrae esta misma información para los churnes donde el mes de la última fecha de extracción correspondería a la fecha de Churn*/
+SELECT 
+t.MES, t.TENURE, COUNT(DISTINCT t.ACT_ACCT_CD)
+FROM CHURNFLAGRESULT  t 
+--WHERE ChurnFlag="Churner"
+GROUP BY MES, TENURE
+ORDER BY MES, CASE WHEN TENURE ="<1A" THEN 1
+                                WHEN TENURE="1-3 A" THEN 2
+                                WHEN TENURE="3-6 A" THEN 3
+                                WHEN TENURE="6-10 A" THEN 4
+                                WHEN TENURE=">10A" THEN 5 END
+
+
+
+
